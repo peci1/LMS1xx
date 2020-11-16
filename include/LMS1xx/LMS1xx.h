@@ -118,6 +118,8 @@ public:
   */
   void setScanCfg(const scanCfg &cfg);
 
+  void configureNTPBehaviour();
+
   /*!
   * @brief Set scan data configuration.
   * Set format of scan message returned by device.

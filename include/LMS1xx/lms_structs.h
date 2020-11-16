@@ -153,6 +153,7 @@ struct scanOutputRange
 */
 struct scanData
 {
+  uint32_t TimestampEndMeasurement;
 
   /*!
    * @brief Number of samples in dist1.

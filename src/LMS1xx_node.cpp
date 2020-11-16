@@ -28,8 +28,20 @@
 #include "sensor_msgs/LaserScan.h"
 #include <limits>
 #include <string>
+#include <sys/param.h>
 
 #define DEG2RAD M_PI/180.0
+
+struct adjusted_stamps
+{
+  double coefficient; // The predicted rate of the lidar stamping clock
+
+  ros::WallTime robot_absolute_start; // This stamp is the absolute start of the measurement
+  ros::WallTime lidar_absolute_start; // This stamp is the very first lidar stamp at the start of the measurement
+
+  ros::WallTime lidar_curr; // The time obtained from the sensor
+  ros::WallTime stamp_curr; // The stamp calculated using the algorithm
+};
 
 int main(int argc, char **argv)
 {
@@ -61,6 +73,8 @@ int main(int argc, char **argv)
   n.param<float>("range_min", range_min, 0.01);
   n.param<float>("range_max", range_max, 20.0);
   n.param<int>("port", port, 2111);
+
+  adjusted_stamps AdjustedStamps = {};
 
   while (ros::ok())
   {
@@ -103,8 +117,8 @@ int main(int argc, char **argv)
         outputRange.startAngle / 10000.0 * DEG2RAD - M_PI / 2);
     scan_msg.angle_max = scan2_msg.angle_max = static_cast<double>(
         outputRange.stopAngle / 10000.0 * DEG2RAD - M_PI / 2);
-    ROS_DEBUG_STREAM("Device resolution is " << (double)outputRange.angleResolution / 10000.0 << " degrees.");
-    ROS_DEBUG_STREAM("Device frequency is " << (double)cfg.scaningFrequency / 100.0 << " Hz");
+    ROS_DEBUG_STREAM("Device resolution is " << (double) outputRange.angleResolution / 10000.0 << " degrees.");
+    ROS_DEBUG_STREAM("Device frequency is " << (double) cfg.scaningFrequency / 100.0 << " Hz");
 
     int angle_range = outputRange.stopAngle - outputRange.startAngle;
     int num_values = angle_range / outputRange.angleResolution;
@@ -115,15 +129,16 @@ int main(int argc, char **argv)
     }
     scan_msg.ranges.resize(num_values);
     scan_msg.intensities.resize(num_values);
-    if (publish_2nd_pulse) {
+    if (publish_2nd_pulse)
+    {
       scan2_msg.ranges.resize(num_values);
       scan2_msg.intensities.resize(num_values);
     }
 
     scan_msg.time_increment = scan2_msg.time_increment =
-      (outputRange.angleResolution / 10000.0)
-      / 360.0
-      / (cfg.scaningFrequency / 100.0);
+        (outputRange.angleResolution / 10000.0)
+        / 360.0
+        / (cfg.scaningFrequency / 100.0);
 
     ROS_DEBUG_STREAM("Time increment is " << static_cast<int>(scan_msg.time_increment * 1000000) << " microseconds");
 
@@ -133,6 +148,7 @@ int main(int argc, char **argv)
     dataCfg.encoder = 0;
     dataCfg.position = false;
     dataCfg.deviceName = false;
+    dataCfg.timestamp = false;
     dataCfg.outputInterval = 1;
 
     ROS_DEBUG("Setting scan data configuration.");
@@ -181,6 +197,12 @@ int main(int argc, char **argv)
     ROS_DEBUG("Commanding continuous measurements.");
     laser.scanContinous(1);
 
+
+    // These are used to update data.timestampEndMeasurement when it inevitably overflows
+    uint32_t LastEndMeasurement = 0;
+    int EndMeasurementOverflowCount = 0;
+    ros::WallDuration AddToEndMeasurement(4294.967295); // NOTE: 4294.967295 is unsigned int max value microseconds converted to seconds
+
     while (ros::ok())
     {
       ros::Time start = ros::Time::now();
@@ -189,10 +211,44 @@ int main(int argc, char **argv)
       ++scan_msg.header.seq;
       ++scan2_msg.header.seq;
 
+
       scanData data;
       ROS_DEBUG("Reading scan data.");
       if (laser.getScanData(&data))
       {
+        if(data.TimestampEndMeasurement < LastEndMeasurement)
+        {
+          ++EndMeasurementOverflowCount;
+        }
+
+        static bool firstTime = true;
+        if(firstTime)
+        {
+          firstTime = false;
+          
+          AdjustedStamps.coefficient = 7.200045 / 7.2;
+          ros::WallTime FirstLidar = ros::WallTime(data.TimestampEndMeasurement / 1000000, (data.TimestampEndMeasurement % 1000000) * 1000) +
+                                         AddToEndMeasurement * EndMeasurementOverflowCount;
+          ros::WallTime FirstRobot = ros::WallTime::now();
+
+
+          AdjustedStamps.lidar_curr = FirstLidar;
+          AdjustedStamps.robot_absolute_start = FirstRobot;
+          AdjustedStamps.lidar_absolute_start = FirstLidar;
+          AdjustedStamps.stamp_curr = AdjustedStamps.robot_absolute_start;
+        }
+        else
+        {
+          AdjustedStamps.lidar_curr = ros::WallTime(data.TimestampEndMeasurement / 1000000, (data.TimestampEndMeasurement % 1000000) * 1000)+
+                                    AddToEndMeasurement * EndMeasurementOverflowCount;
+          AdjustedStamps.stamp_curr = AdjustedStamps.robot_absolute_start + (AdjustedStamps.lidar_curr - AdjustedStamps.lidar_absolute_start) * AdjustedStamps.coefficient;
+        }
+
+        ros::Time Stamp(AdjustedStamps.stamp_curr.sec, AdjustedStamps.stamp_curr.nsec);
+        printf("New stamp is: %u.%09u\n", Stamp.sec, Stamp.nsec);
+        scan_msg.header.stamp = scan2_msg.header.stamp = Stamp;
+
+
         for (int i = 0; i < data.dist_len1; i++)
         {
           float range_data = data.dist1[i] * 0.001f;
@@ -233,9 +289,12 @@ int main(int argc, char **argv)
           ROS_DEBUG("Publishing second pulse scan data.");
           scan2_pub.publish(scan2_msg);
         }
+
+        LastEndMeasurement = data.TimestampEndMeasurement;
       }
       else
       {
+        printf("getScanData failed!!");
         ROS_ERROR("Laser timed out on delivering scan, attempting to reinitialize.");
         break;
       }
