@@ -33,6 +33,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <linux/net_tstamp.h>
+
 #include "LMS1xx/LMS1xx.h"
 #include "console_bridge/console.h"
 
@@ -56,6 +58,7 @@ void LMS1xx::connect(std::string host, int port)
       stSockAddr.sin_family = PF_INET;
       stSockAddr.sin_port = htons(port);
       inet_pton(AF_INET, host.c_str(), &stSockAddr.sin_addr);
+
 
       logDebug("Connecting socket to laser.");
       int ret = ::connect(socket_fd_, (struct sockaddr *) &stSockAddr, sizeof(stSockAddr));
@@ -182,14 +185,16 @@ scanCfg LMS1xx::getScanCfg() const
 
 void LMS1xx::setScanCfg(const scanCfg &cfg)
 {
-  char buf[100];
+  char buf[100] = {};
+  int len;
+
   sprintf(buf, "%c%s %X +1 %X %X %X%c", 0x02, "sMN mLMPsetscancfg",
           cfg.scaningFrequency, cfg.angleResolution, cfg.startAngle,
           cfg.stopAngle, 0x03);
 
   write(socket_fd_, buf, strlen(buf));
 
-  int len = read(socket_fd_, buf, 100);
+  len = read(socket_fd_, buf, 100);
 
   buf[len - 1] = 0;
 }
@@ -197,6 +202,8 @@ void LMS1xx::setScanCfg(const scanCfg &cfg)
 void LMS1xx::setScanDataCfg(const scanDataCfg &cfg)
 {
   char buf[100];
+  int len;
+
   sprintf(buf, "%c%s %02X 00 %d %d 0 %02X 00 %d %d 0 %d +%d%c", 0x02,
           "sWN LMDscandatacfg", cfg.outputChannel, cfg.remission ? 1 : 0,
           cfg.resolution, cfg.encoder, cfg.position ? 1 : 0,
@@ -204,7 +211,7 @@ void LMS1xx::setScanDataCfg(const scanDataCfg &cfg)
   logDebug("TX: %s", buf);
   write(socket_fd_, buf, strlen(buf));
 
-  int len = read(socket_fd_, buf, 100);
+  len = read(socket_fd_, buf, 100);
   buf[len - 1] = 0;
 }
 
@@ -269,6 +276,7 @@ bool LMS1xx::getScanData(scanData* scan_data)
       {
         parseScanData(buffer_data, scan_data);
         buffer_.popLastBuffer();
+
         return true;
       }
     }
@@ -291,8 +299,13 @@ void LMS1xx::parseScanData(char* buffer, scanData* data)
   tok = strtok(NULL, " "); //DeviceStatus
   tok = strtok(NULL, " "); //MessageCounter
   tok = strtok(NULL, " "); //ScanCounter
+  // The format is Uint32
   tok = strtok(NULL, " "); //PowerUpDuration
+
+  // NOTE: This is the time since boot up until end of measurement in microseconds, used as a timestamp
   tok = strtok(NULL, " "); //TransmissionDuration
+  sscanf(tok, "%X", &data->TimestampEndMeasurement);
+
   tok = strtok(NULL, " "); //InputStatus
   tok = strtok(NULL, " "); //OutputStatus
   tok = strtok(NULL, " "); //ReservedByteA
@@ -362,7 +375,6 @@ void LMS1xx::parseScanData(char* buffer, scanData* data)
     {
       data->rssi_len2 = NumberData;
     }
-
 
     /*
      * TODO: there are range/rssi values with special meaning!
@@ -485,6 +497,39 @@ void LMS1xx::parseScanData(char* buffer, scanData* data)
         data->rssi2[i] = dat;
       }
     }
+
+  }
+
+  tok = strtok(NULL, " "); // Position data (is not output by the scanner)
+  tok = strtok(NULL, " "); // Device name
+  int namePresent = 0;
+  sscanf(tok, "%d", &namePresent);
+  if(namePresent)
+  {
+    tok = strtok(NULL, " "); // Length of name
+    tok = strtok(NULL, " "); // Name string
+  }
+  tok = strtok(NULL, " "); // Comment (is not output by the scanner)
+  tok = strtok(NULL, " "); // Time stamp
+  int timePresent;
+  sscanf(tok, "%d", &timePresent);
+  if(timePresent)
+  {
+    //int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, microsecond = 0;
+    tok = strtok(NULL, " ");
+    //sscanf(tok, "%X", &year);
+    tok = strtok(NULL, " ");
+    //sscanf(tok, "%X", &month);
+    tok = strtok(NULL, " ");
+    //sscanf(tok, "%X", &day);
+    tok = strtok(NULL, " ");
+    //sscanf(tok, "%X", &hour);
+    tok = strtok(NULL, " ");
+    //sscanf(tok, "%X", &minute);
+    tok = strtok(NULL, " ");
+    //sscanf(tok, "%X", &second);
+    tok = strtok(NULL, " ");
+    //sscanf(tok, "%X", &microsecond);
   }
 }
 
